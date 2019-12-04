@@ -1,3 +1,4 @@
+
 #include <Arduino.h>
 #include <ESP8266WiFi.h>
 
@@ -18,8 +19,9 @@
 #define WLAN_SSID        "SSID"
 #define WLAN_PASS        "PASSWORD"
 #define MQTT_ID          "sensair"
-#define MQTT_SERVER      "192.168.1.1"
+#define MQTT_SERVER      "192.168.1.2"
 #define MQTT_SERVERPORT  1883                   // use 8883 for SSL
+
 
 
 static MqttClient *mqtt = NULL;
@@ -39,13 +41,13 @@ public:
 
 
 
-int rxPin = D7;
-int txPin = D0;
+int rxPin = D6;
+int txPin = D7;
 
-#define BME_SCK D1
-#define BME_MISO D6
-#define BME_MOSI D2
-#define BME_CS D5
+//#define BME_SCK D1
+//#define BME_MISO D6
+//#define BME_MOSI D2
+//#define BME_CS D5
 
 #define SEALEVELPRESSURE_HPA (1013.25)
 
@@ -53,6 +55,31 @@ Adafruit_BME680 bme; // I2C
 //Adafruit_BME680 bme(BME_CS); // hardware SPI
 //Adafruit_BME680 bme(BME_CS, BME_MOSI, BME_MISO,  BME_SCK);
 SdsDustSensor sds(rxPin, txPin);
+
+int co2pwmPin = D5;
+volatile unsigned long co2timehigh, co2timelow, co2prevhigh, co2prevlow, co2ppm, prevco2ppm, publishco2ppm = 0;
+volatile byte donerising, donefalling = 0;
+
+ICACHE_RAM_ATTR void co2rising() {
+  attachInterrupt(digitalPinToInterrupt(co2pwmPin), co2falling, FALLING);
+
+  co2prevhigh = millis();
+  co2timelow = co2prevhigh - co2prevlow;
+}
+ 
+ICACHE_RAM_ATTR void co2falling() {
+  attachInterrupt(digitalPinToInterrupt(co2pwmPin), co2rising, RISING);
+
+  co2prevlow = millis();
+  co2timehigh = co2prevlow - co2prevhigh;
+
+  prevco2ppm = co2ppm;
+  co2ppm = 5000 * (co2timehigh - 2) / (co2timehigh + co2timelow - 4);
+
+  if (prevco2ppm > 0 && co2timehigh > 0 && co2timelow > 0) {
+    publishco2ppm = co2ppm;
+  }
+}
 
 void setup() {
   delay(1000);
@@ -69,6 +96,10 @@ void setup() {
   bme.setIIRFilterSize(BME680_FILTER_SIZE_3);
   bme.setGasHeater(320, 150); // 320*C for 150 ms
 
+  pinMode(co2pwmPin, INPUT); 
+  digitalWrite(co2pwmPin, HIGH);
+  attachInterrupt(digitalPinToInterrupt(co2pwmPin), co2rising, RISING);
+
   // Setup WiFi network
   WiFi.mode(WIFI_STA);
   WiFi.hostname("ESP_" MQTT_ID);
@@ -79,7 +110,7 @@ void setup() {
   }
   Serial.print("Connected to WiFi, IP: ");
   Serial.println(WiFi.localIP().toString().c_str());
-  
+
   // Setup MqttClient
   MqttClient::System *mqttSystem = new System;
   MqttClient::Logger *mqttLogger = new MqttClient::LoggerImpl<HardwareSerial>(Serial);
@@ -99,6 +130,7 @@ void setup() {
     mqttOptions, *mqttLogger, *mqttSystem, *mqttNetwork, *mqttSendBuffer,
     *mqttRecvBuffer, *mqttMessageHandlers
   );
+
 }
 
 void loop() {
@@ -157,8 +189,8 @@ void loop() {
     Serial.print(pm25);
     Serial.print(", PM10 = ");
     Serial.println(pm10);
-    publishMessage("haklab/hardware/dust", (String("PM2.5 ") + String(pm25)).c_str());
-    publishMessage("haklab/hardware/dust", (String("PM10 ") + String(pm10)).c_str());
+    publishMessage("k0doma/dust2", String(pm25).c_str());
+    publishMessage("k0doma/dust10", String(pm10).c_str());
   } else {
     Serial.print("Could not read values from sensor, reason: ");
     Serial.println(pm.statusToString());
@@ -175,31 +207,48 @@ void loop() {
     Serial.print(F("Temperature = "));
     Serial.print(temperature);
     Serial.println(F(" *C"));
-    publishMessage("haklab/hardware/temp", String(temperature).c_str());
+    publishMessage("k0doma/temp", String(temperature).c_str());
 
     float pressure = bme.pressure / 100.0;
     Serial.print(F("Pressure = "));
     Serial.print(pressure);
     Serial.println(F(" hPa"));
-    publishMessage("haklab/hardware/pressure", String(pressure).c_str());
+    publishMessage("k0doma/pressure", String(pressure).c_str());
 
     float humidity = bme.humidity;
     Serial.print(F("Humidity = "));
     Serial.print(humidity);
     Serial.println(F(" %"));
-    publishMessage("haklab/hardware/humid", String(humidity).c_str());
+    publishMessage("k0doma/humid", String(humidity).c_str());
 
     float gas = bme.gas_resistance / 1000.0;
     Serial.print(F("Gas = "));
     Serial.print(gas);
     Serial.println(F(" KOhms"));
-    publishMessage("haklab/hardware/gaskohm", String(gas).c_str());
+    publishMessage("k0doma/volatile", String(gas).c_str());
   
     Serial.print(F("Approx. Altitude = "));
     Serial.print(bme.readAltitude(SEALEVELPRESSURE_HPA));
     Serial.println(F(" m"));
   } else {    
     Serial.println(F("Failed to complete reading :("));
+  }
+
+  if (publishco2ppm > 0) {
+    long co2val = publishco2ppm;
+    publishco2ppm = 0;
+
+    Serial.print(F("CO2 = "));
+    Serial.print(co2val);
+    Serial.println(F(" PPM"));
+    publishMessage("k0doma/co2", String(co2val).c_str());
+  } else {
+    Serial.print(F("CO2 NO co2timelow="));
+    Serial.println(co2timelow);
+    Serial.print(F("CO2 NO co2timehigh="));
+    Serial.println(co2timehigh);
+    Serial.print(F("CO2 NO co2ppm="));
+    Serial.println(co2ppm);
   }
 
   Serial.println();
