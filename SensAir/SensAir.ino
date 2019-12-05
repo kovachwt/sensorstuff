@@ -1,27 +1,29 @@
-
 #include <Arduino.h>
 #include <ESP8266WiFi.h>
-
 #include <SdsDustSensor.h>
-
 #include <MqttClient.h>
-
 #include <Adafruit_BME680.h>
-#include <bme680.h>
-#include <bme680_defs.h>
-
 #include <Wire.h>
 #include <SPI.h>
 
-
+//#include <OneWire.h>
+//#include <DallasTemperature.h>
 
 #define HW_UART_SPEED                 115200L
-#define WLAN_SSID        "SSID"
-#define WLAN_PASS        "PASSWORD"
+#define WLAN_SSID        "sensair"
+#define WLAN_PASS        "********"
 #define MQTT_ID          "sensair"
-#define MQTT_SERVER      "192.168.1.2"
+#define MQTT_SERVER      "5.196.95.208"
 #define MQTT_SERVERPORT  1883                   // use 8883 for SSL
+#define MQTT_USERNAME    "sensair"
+#define MQTT_PASSWORD    "********"
 
+// determine SDS011 DutyCycle = SDS011_WORK_SECONDS / (SDS011_WORK_SECONDS + SLEEP_SECONDS)
+#define SDS011_WORK_SECONDS    30              // should be at least 30 if SDS011 is connected
+#define SLEEP_SECONDS          30              // should be at least 30 if SDS011 is connected
+
+// this is usually 4 degrees Celsius, because of the heating element on the BME680
+#define BME680_TEMP_OFFSET     -4
 
 
 static MqttClient *mqtt = NULL;
@@ -39,7 +41,9 @@ public:
   }
 };
 
-
+//#define ONE_WIRE_BUS       D4
+//OneWire oneWire(ONE_WIRE_BUS);
+//DallasTemperature sensors(&oneWire);
 
 int rxPin = D6;
 int txPin = D7;
@@ -84,6 +88,8 @@ ICACHE_RAM_ATTR void co2falling() {
 void setup() {
   delay(1000);
   Serial.begin(115200);
+
+  //pinMode(ONE_WIRE_BUS, INPUT_PULLUP);
 
   sds.begin();
   Serial.println(sds.setQueryReportingMode().toString()); // ensures sensor is in 'query' reporting mode
@@ -152,6 +158,8 @@ void loop() {
       MQTTPacket_connectData options = MQTTPacket_connectData_initializer;
       options.MQTTVersion = 4;
       options.clientID.cstring = (char*)MQTT_ID;
+      options.username.cstring = (char*)MQTT_USERNAME;
+      options.password.cstring = (char*)MQTT_PASSWORD;
       options.cleansession = true;
       options.keepAliveInterval = 15; // 15 seconds
       MqttClient::Error::type rc = mqtt->connect(options, connectResult);
@@ -173,12 +181,12 @@ void loop() {
   Serial.println("Waking up SDS011");
   sds.wakeup();
 
-  // wait 30 seconds for SDS sensor to work a little
-  Serial.println("Waiting 30 seconds for sensor to work");
+  // wait at least 30 seconds for SDS sensor to work a little
+  Serial.print("Waiting "); Serial.print(SDS011_WORK_SECONDS); Serial.println(" seconds for sensor to work");
   if (mqtt->isConnected()) {
-    mqtt->yield(30000L);
+    mqtt->yield(1000L * SDS011_WORK_SECONDS);
   } else {
-    delay(30000);
+    delay(1000 * SDS011_WORK_SECONDS);
   }
 
   PmResult pm = sds.queryPm();
@@ -199,11 +207,21 @@ void loop() {
   WorkingStateResult state = sds.sleep();
 
 
+  //sensors.begin();
+  //sensors.setResolution(12);
+  //Serial.print("Requesting temperatures...");
+  //sensors.requestTemperatures(); // Send the command to get temperatures
+  //Serial.println("DONE");
+  //Serial.print("Temperature for the device 1 (index 0) is: ");
+  //Serial.println(sensors.getTempCByIndex(0));  
+  //pinMode(ONE_WIRE_BUS, INPUT_PULLUP);
+
+
   if (bme.endReading()) {
     Serial.print(F("Reading completed at "));
     Serial.println(millis());
 
-    float temperature = bme.temperature;
+    float temperature = bme.temperature + BME680_TEMP_OFFSET;
     Serial.print(F("Temperature = "));
     Serial.print(temperature);
     Serial.println(F(" *C"));
@@ -258,13 +276,13 @@ void loop() {
   if (state.isWorking()) {
     Serial.println("Problem with sleeping the sensor.");
   } else {
-    Serial.println("Sensor is sleeping for 30 seconds.");
+    Serial.print("Sensor is sleeping for "); Serial.print(SLEEP_SECONDS); Serial.println(" seconds.");
 
     // wait 30 seconds
     if (mqtt->isConnected()) {
-      mqtt->yield(30000L);
+      mqtt->yield(1000L * SLEEP_SECONDS);
     } else {
-      delay(30000);
+      delay(1000 * SLEEP_SECONDS);
     }
   }
   Serial.println();
@@ -273,9 +291,9 @@ void loop() {
 void publishMessage(const char *topic, const char *buf) {
   if (mqtt->isConnected()) {
     MqttClient::Message message;
-    message.qos = MqttClient::QOS0;
-    message.retained = false;
-    message.dup = false;
+    message.qos = MqttClient::QOS1;
+    message.retained = true;
+    //message.dup = false;
     message.payload = (void*) buf;
     message.payloadLen = strlen(buf);
     mqtt->publish(topic, message);
